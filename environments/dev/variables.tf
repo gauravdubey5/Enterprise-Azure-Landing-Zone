@@ -48,39 +48,105 @@ variable "extra_tags" {
   default     = {}
 }
 
-variable "hub_address_space" {
-  type    = list(string)
-  default = ["10.0.0.0/16"]
+variable "admin_username" {
+  type        = string
+  description = "Administrator username for Linux VMs"
+  default     = "azureuser"
 }
 
-variable "spoke_address_space" {
-  type    = list(string)
-  default = ["10.1.0.0/16"]
+variable "admin_ssh_public_key" {
+  type        = string
+  description = "SSH Public Key for Linux VMSS instances"
+  default     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGX8a5dF+p1k93VqM5yL01bZl81234567890abcdefgh enterprise-admin@company.com"
 }
 
-variable "enable_firewall" {
-  type    = bool
-  default = true
+# Nested Maps
+variable "resource_groups" {
+  type = map(object({
+    name_suffix = string
+    location    = optional(string)
+    tags        = optional(map(string), {})
+  }))
 }
 
-variable "firewall_sku_tier" {
-  type    = string
-  default = "Standard"
+variable "networks" {
+  type = map(object({
+    name_suffix   = string
+    rg_key        = string
+    address_space = list(string)
+    subnets = map(object({
+      address_prefixes                  = list(string)
+      service_endpoints                 = optional(list(string), [])
+      private_endpoint_network_policies = optional(string, "Disabled")
+      delegations = optional(list(object({
+        name = string
+        service_delegation = object({
+          name    = string
+          actions = optional(list(string))
+        })
+      })), [])
+    }))
+  }))
 }
 
-variable "enable_bastion" {
-  type    = bool
-  default = true
+variable "route_tables" {
+  type = map(object({
+    name_suffix = string
+    rg_key      = string
+    vnet_key    = string
+    subnet_key  = string
+    routes = list(object({
+      name                   = string
+      address_prefix         = string
+      next_hop_type          = string
+      next_hop_to_firewall   = optional(bool, false)
+      next_hop_in_ip_address = optional(string)
+    }))
+  }))
 }
 
-variable "enable_vpn_gateway" {
-  type    = bool
-  default = false
+variable "network_security_groups" {
+  type = map(object({
+    name_suffix = string
+    rg_key      = string
+    vnet_key    = string
+    subnet_key  = string
+    security_rules = list(object({
+      name                         = string
+      priority                     = number
+      direction                    = string
+      access                       = string
+      protocol                     = string
+      source_port_range            = optional(string)
+      source_port_ranges           = optional(list(string))
+      destination_port_range       = optional(string)
+      destination_port_ranges      = optional(list(string))
+      source_address_prefix        = optional(string)
+      source_address_prefixes      = optional(list(string))
+      destination_address_prefix   = optional(string)
+      destination_address_prefixes = optional(list(string))
+      description                  = optional(string)
+    }))
+  }))
 }
 
-variable "enable_application_gateway" {
-  type    = bool
-  default = true
+variable "vms" {
+  type = map(object({
+    name_suffix     = string
+    rg_key          = string
+    vnet_key        = string
+    subnet_key      = string
+    sku             = string
+    instances       = number
+    min_instances   = optional(number, 2)
+    max_instances   = optional(number, 10)
+    zones           = list(string)
+    target_balancer = string
+  }))
+}
+
+variable "private_dns_zones" {
+  type = list(string)
 }
 
 variable "enable_private_endpoints" {
@@ -88,63 +154,123 @@ variable "enable_private_endpoints" {
   default = true
 }
 
-variable "enable_cosmos_db" {
-  type    = bool
-  default = false
+variable "private_endpoints" {
+  type = map(object({
+    name_suffix       = string
+    rg_key            = string
+    vnet_key          = string
+    subnet_key        = string
+    target_type       = string
+    subresource_names = list(string)
+    dns_zone_name     = string
+  }))
 }
 
-variable "enable_redis" {
-  type    = bool
-  default = false
+# Structured Service Objects
+variable "firewall" {
+  type = object({
+    enabled           = bool
+    sku_tier          = string
+    threat_intel_mode = string
+    zones             = list(string)
+  })
 }
 
-variable "enable_monitoring" {
-  type    = bool
-  default = true
+variable "bastion" {
+  type = object({
+    enabled = bool
+    sku     = string
+    zones   = list(string)
+  })
 }
 
-variable "enable_backup" {
-  type    = bool
-  default = false
+variable "vpn_gateway" {
+  type = object({
+    enabled       = bool
+    sku           = string
+    active_active = bool
+    enable_bgp    = bool
+    zones         = list(string)
+  })
 }
 
-variable "admin_username" {
-  type    = string
-  default = "azureuser"
+variable "dns_resolver" {
+  type = object({
+    enabled = bool
+    forwarding_rules = optional(map(object({
+      domain_name = string
+      enabled     = optional(bool, true)
+      target_dns_servers = list(object({
+        ip_address = string
+        port       = optional(number, 53)
+      }))
+    })), {})
+  })
 }
 
-variable "admin_ssh_public_key" {
-  type    = string
-  default = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGX8a5dF+p1k93VqM5yL01bZl81234567890abcdefgh enterprise-admin@company.com"
+variable "application_gateway" {
+  type = object({
+    enabled           = bool
+    waf_mode          = string
+    min_capacity      = number
+    max_capacity      = number
+    zones             = list(string)
+    backend_port      = number
+    health_probe_path = string
+  })
 }
 
-variable "frontend_vm_sku" {
-  type    = string
-  default = "Standard_B2s"
+variable "internal_lb" {
+  type = object({
+    frontend_port  = number
+    backend_port   = number
+    probe_protocol = string
+    probe_path     = string
+    zones          = list(string)
+  })
 }
 
-variable "frontend_instances" {
-  type    = number
-  default = 2
-}
-
-variable "backend_vm_sku" {
-  type    = string
-  default = "Standard_B2s"
-}
-
-variable "backend_instances" {
-  type    = number
-  default = 2
-}
-
-variable "sql_admin_username" {
-  type    = string
-  default = "sqladminuser"
-}
-
-variable "sql_admin_password" {
-  type      = string
-  default   = "P@ssw0rdDev2026!#Strong"
+variable "sql_database" {
+  type = object({
+    sku_name       = string
+    zone_redundant = bool
+    max_size_gb    = number
+    admin_username = string
+    admin_password = string
+  })
   sensitive = true
+}
+
+variable "cosmos_db" {
+  type = object({
+    enabled        = bool
+    zone_redundant = bool
+  })
+}
+
+variable "redis" {
+  type = object({
+    enabled  = bool
+    sku_name = string
+    family   = string
+    capacity = number
+    zones    = list(string)
+  })
+}
+
+variable "monitoring" {
+  type = object({
+    retention_in_days  = number
+    alert_email        = string
+    enable_vmss_alert  = bool
+    enable_appgw_alert = bool
+  })
+}
+
+variable "backup" {
+  type = object({
+    enabled               = bool
+    storage_mode_type     = string
+    retention_daily_count = number
+  })
 }
