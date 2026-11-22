@@ -1,6 +1,3 @@
-# Dev Environment - main.tf
-# Reuses the exact same production modules with dev-tuned scale & SKUs
-
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
@@ -100,477 +97,234 @@ SVC
   EOF
 }
 
-# Resource Groups
-module "hub_rg" {
+# Resource Groups (for_each over nested map)
+module "resource_groups" {
+  for_each = var.resource_groups
   source   = "../../modules/resource-group"
-  name     = "${local.name_prefix}-hub-rg"
-  location = var.location
-  tags     = local.tags
-}
-
-module "spoke_rg" {
-  source   = "../../modules/resource-group"
-  name     = "${local.name_prefix}-spoke-rg"
-  location = var.location
-  tags     = local.tags
-}
-
-module "data_rg" {
-  source   = "../../modules/resource-group"
-  name     = "${local.name_prefix}-data-rg"
-  location = var.location
-  tags     = local.tags
+  name     = "${local.name_prefix}-${each.value.name_suffix}"
+  location = coalesce(each.value.location, var.location)
+  tags     = merge(local.tags, each.value.tags)
 }
 
 # Monitoring
 module "monitoring" {
   source              = "../../modules/monitoring"
   name                = "${local.name_prefix}-law"
-  resource_group_name = module.hub_rg.name
-  location            = module.hub_rg.location
-  retention_in_days   = 30
-  alert_email         = "dev-ops@example.com"
-  enable_vmss_alert   = true
-  monitored_vmss_id   = module.frontend_vmss.id
-  enable_appgw_alert  = var.enable_application_gateway
-  monitored_appgw_id  = var.enable_application_gateway ? module.application_gateway[0].id : null
+  resource_group_name = module.resource_groups["hub"].name
+  location            = module.resource_groups["hub"].location
+  retention_in_days   = var.monitoring.retention_in_days
+  alert_email         = var.monitoring.alert_email
+  enable_vmss_alert   = var.monitoring.enable_vmss_alert
+  monitored_vmss_id   = module.vmss["frontend"].id
+  enable_appgw_alert  = var.application_gateway.enabled && var.monitoring.enable_appgw_alert
+  monitored_appgw_id  = var.application_gateway.enabled ? module.application_gateway[0].id : null
   tags                = local.tags
 }
 
-# Hub VNet
-module "hub_vnet" {
+# Virtual Networks & Subnets (for_each over nested map)
+module "virtual_networks" {
+  for_each            = var.networks
   source              = "../../modules/virtual-network"
-  name                = "${local.name_prefix}-hub-vnet"
-  resource_group_name = module.hub_rg.name
-  location            = module.hub_rg.location
-  address_space       = var.hub_address_space
+  name                = "${local.name_prefix}-${each.value.name_suffix}"
+  resource_group_name = module.resource_groups[each.value.rg_key].name
+  location            = module.resource_groups[each.value.rg_key].location
+  address_space       = each.value.address_space
   tags                = local.tags
 }
 
-module "hub_subnets" {
+module "subnets" {
+  for_each             = var.networks
   source               = "../../modules/subnet"
-  resource_group_name  = module.hub_rg.name
-  virtual_network_name = module.hub_vnet.name
+  resource_group_name  = module.resource_groups[each.value.rg_key].name
+  virtual_network_name = module.virtual_networks[each.key].name
+  subnets              = each.value.subnets
 
-  subnets = {
-    AzureFirewallSubnet = {
-      address_prefixes = ["10.0.1.0/26"]
-    }
-    AzureFirewallManagementSubnet = {
-      address_prefixes = ["10.0.1.64/26"]
-    }
-    AzureBastionSubnet = {
-      address_prefixes = ["10.0.2.0/26"]
-    }
-    GatewaySubnet = {
-      address_prefixes = ["10.0.3.0/27"]
-    }
-    InboundDnsResolverSubnet = {
-      address_prefixes = ["10.0.4.0/28"]
-      delegations = [{
-        name = "Microsoft.Network.dnsResolvers"
-        service_delegation = {
-          name    = "Microsoft.Network/dnsResolvers"
-          actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
-        }
-      }]
-    }
-    OutboundDnsResolverSubnet = {
-      address_prefixes = ["10.0.4.16/28"]
-      delegations = [{
-        name = "Microsoft.Network.dnsResolvers"
-        service_delegation = {
-          name    = "Microsoft.Network/dnsResolvers"
-          actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
-        }
-      }]
-    }
-    SharedServicesSubnet = {
-      address_prefixes  = ["10.0.5.0/24"]
-      service_endpoints = ["Microsoft.KeyVault", "Microsoft.Storage"]
-    }
-  }
-
-  depends_on = [module.hub_vnet]
+  depends_on = [module.virtual_networks]
 }
 
-# Spoke VNet
-module "spoke_vnet" {
-  source              = "../../modules/virtual-network"
-  name                = "${local.name_prefix}-spoke-vnet"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  address_space       = var.spoke_address_space
-  tags                = local.tags
-}
-
-module "spoke_subnets" {
-  source               = "../../modules/subnet"
-  resource_group_name  = module.spoke_rg.name
-  virtual_network_name = module.spoke_vnet.name
-
-  subnets = {
-    AppGatewaySubnet = {
-      address_prefixes = ["10.1.1.0/24"]
-    }
-    FrontendSubnet = {
-      address_prefixes  = ["10.1.2.0/24"]
-      service_endpoints = ["Microsoft.KeyVault", "Microsoft.Storage"]
-    }
-    InternalLbSubnet = {
-      address_prefixes = ["10.1.3.0/24"]
-    }
-    BackendSubnet = {
-      address_prefixes  = ["10.1.4.0/24"]
-      service_endpoints = ["Microsoft.Sql", "Microsoft.Storage", "Microsoft.KeyVault"]
-    }
-    PrivateEndpointSubnet = {
-      address_prefixes                  = ["10.1.5.0/24"]
-      private_endpoint_network_policies = "Disabled"
-    }
-  }
-
-  depends_on = [module.spoke_vnet]
-}
-
-# Hub Gateways
+# Gateways
 module "firewall" {
-  count                      = var.enable_firewall ? 1 : 0
+  count                      = var.firewall.enabled ? 1 : 0
   source                     = "../../modules/firewall"
   name                       = "${local.name_prefix}-afw"
-  resource_group_name        = module.hub_rg.name
-  location                   = module.hub_rg.location
-  subnet_id                  = module.hub_subnets.subnet_ids["AzureFirewallSubnet"]
-  sku_tier                   = var.firewall_sku_tier
-  zones                      = ["1", "2"]
+  resource_group_name        = module.resource_groups["hub"].name
+  location                   = module.resource_groups["hub"].location
+  subnet_id                  = module.subnets["hub"].subnet_ids["AzureFirewallSubnet"]
+  sku_tier                   = var.firewall.sku_tier
+  threat_intel_mode          = var.firewall.threat_intel_mode
+  zones                      = var.firewall.zones
   log_analytics_workspace_id = module.monitoring.id
   tags                       = local.tags
 }
 
 module "bastion" {
-  count                      = var.enable_bastion ? 1 : 0
+  count                      = var.bastion.enabled ? 1 : 0
   source                     = "../../modules/bastion"
   name                       = "${local.name_prefix}-bas"
-  resource_group_name        = module.hub_rg.name
-  location                   = module.hub_rg.location
-  subnet_id                  = module.hub_subnets.subnet_ids["AzureBastionSubnet"]
-  sku                        = "Basic"
-  zones                      = ["1"]
+  resource_group_name        = module.resource_groups["hub"].name
+  location                   = module.resource_groups["hub"].location
+  subnet_id                  = module.subnets["hub"].subnet_ids["AzureBastionSubnet"]
+  sku                        = var.bastion.sku
+  zones                      = var.bastion.zones
+  log_analytics_workspace_id = module.monitoring.id
+  tags                       = local.tags
+}
+
+module "vpn_gateway" {
+  count                      = var.vpn_gateway.enabled ? 1 : 0
+  source                     = "../../modules/vpn-gateway"
+  name                       = "${local.name_prefix}-vpngw"
+  resource_group_name        = module.resource_groups["hub"].name
+  location                   = module.resource_groups["hub"].location
+  subnet_id                  = module.subnets["hub"].subnet_ids["GatewaySubnet"]
+  sku                        = var.vpn_gateway.sku
+  active_active              = var.vpn_gateway.active_active
+  enable_bgp                 = var.vpn_gateway.enable_bgp
+  zones                      = var.vpn_gateway.zones
   log_analytics_workspace_id = module.monitoring.id
   tags                       = local.tags
 }
 
 module "dns_resolver" {
+  count                      = var.dns_resolver.enabled ? 1 : 0
   source                     = "../../modules/dns-resolver"
   name                       = "${local.name_prefix}-dnsres"
-  resource_group_name        = module.hub_rg.name
-  location                   = module.hub_rg.location
-  virtual_network_id         = module.hub_vnet.id
-  inbound_subnet_id          = module.hub_subnets.subnet_ids["InboundDnsResolverSubnet"]
-  outbound_subnet_id         = module.hub_subnets.subnet_ids["OutboundDnsResolverSubnet"]
-  linked_virtual_network_ids = [module.spoke_vnet.id]
+  resource_group_name        = module.resource_groups["hub"].name
+  location                   = module.resource_groups["hub"].location
+  virtual_network_id         = module.virtual_networks["hub"].id
+  inbound_subnet_id          = module.subnets["hub"].subnet_ids["InboundDnsResolverSubnet"]
+  outbound_subnet_id         = module.subnets["hub"].subnet_ids["OutboundDnsResolverSubnet"]
+  forwarding_rules           = var.dns_resolver.forwarding_rules
+  linked_virtual_network_ids = [module.virtual_networks["spoke"].id]
   tags                       = local.tags
 }
 
 # Peering
 module "vnet_peering" {
   source                    = "../../modules/vnet-peering"
-  hub_resource_group_name   = module.hub_rg.name
-  hub_vnet_name             = module.hub_vnet.name
-  hub_vnet_id               = module.hub_vnet.id
-  spoke_resource_group_name = module.spoke_rg.name
-  spoke_vnet_name           = module.spoke_vnet.name
-  spoke_vnet_id             = module.spoke_vnet.id
-  allow_gateway_transit     = false
+  hub_resource_group_name   = module.resource_groups["hub"].name
+  hub_vnet_name             = module.virtual_networks["hub"].name
+  hub_vnet_id               = module.virtual_networks["hub"].id
+  spoke_resource_group_name = module.resource_groups["spoke"].name
+  spoke_vnet_name           = module.virtual_networks["spoke"].name
+  spoke_vnet_id             = module.virtual_networks["spoke"].id
+  allow_gateway_transit     = var.vpn_gateway.enabled
   use_remote_gateways       = false
-  depends_on                = [module.hub_subnets, module.spoke_subnets]
+
+  depends_on = [module.subnets]
 }
 
-# Route Tables
-module "appgw_route_table" {
+# Route Tables (for_each over nested map)
+module "route_tables" {
+  for_each            = var.route_tables
   source              = "../../modules/route-table"
-  name                = "${local.name_prefix}-appgw-rt"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["AppGatewaySubnet"]]
+  name                = "${local.name_prefix}-${each.value.name_suffix}"
+  resource_group_name = module.resource_groups[each.value.rg_key].name
+  location            = module.resource_groups[each.value.rg_key].location
+  subnet_ids          = [module.subnets[each.value.vnet_key].subnet_ids[each.value.subnet_key]]
   routes = [
-    {
-      name           = "Direct-Internet-Ingress"
-      address_prefix = "0.0.0.0/0"
-      next_hop_type  = "Internet"
+    for r in each.value.routes : {
+      name                   = r.name
+      address_prefix         = r.address_prefix
+      next_hop_type          = r.next_hop_type
+      next_hop_in_ip_address = r.next_hop_to_firewall ? (var.firewall.enabled ? module.firewall[0].private_ip : null) : r.next_hop_in_ip_address
     }
   ]
   tags = local.tags
 }
 
-module "frontend_route_table" {
-  source              = "../../modules/route-table"
-  name                = "${local.name_prefix}-frontend-rt"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["FrontendSubnet"]]
-  routes = var.enable_firewall ? [
-    {
-      name                   = "Egress-Via-Hub-Firewall"
-      address_prefix         = "0.0.0.0/0"
-      next_hop_type          = "VirtualAppliance"
-      next_hop_in_ip_address = module.firewall[0].private_ip
-    }
-  ] : []
-  tags = local.tags
-}
-
-module "backend_route_table" {
-  source              = "../../modules/route-table"
-  name                = "${local.name_prefix}-backend-rt"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["BackendSubnet"]]
-  routes = var.enable_firewall ? [
-    {
-      name                   = "Egress-Via-Hub-Firewall"
-      address_prefix         = "0.0.0.0/0"
-      next_hop_type          = "VirtualAppliance"
-      next_hop_in_ip_address = module.firewall[0].private_ip
-    }
-  ] : []
-  tags = local.tags
-}
-
-# NSGs
-module "appgw_nsg" {
+# NSGs (for_each over nested map)
+module "nsgs" {
+  for_each            = var.network_security_groups
   source              = "../../modules/nsg"
-  name                = "${local.name_prefix}-appgw-nsg"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["AppGatewaySubnet"]]
-  security_rules = [
-    {
-      name                       = "Allow-HTTP-Inbound"
-      priority                   = 100
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "80"
-      source_address_prefix      = "*"
-      destination_address_prefix = "*"
-    },
-    {
-      name                       = "Allow-GatewayManager-Inbound"
-      priority                   = 120
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "65200-65535"
-      source_address_prefix      = "GatewayManager"
-      destination_address_prefix = "*"
-    }
-  ]
-  tags = local.tags
+  name                = "${local.name_prefix}-${each.value.name_suffix}"
+  resource_group_name = module.resource_groups[each.value.rg_key].name
+  location            = module.resource_groups[each.value.rg_key].location
+  subnet_ids          = [module.subnets[each.value.vnet_key].subnet_ids[each.value.subnet_key]]
+  security_rules      = each.value.security_rules
+  tags                = local.tags
 }
 
-module "frontend_nsg" {
-  source              = "../../modules/nsg"
-  name                = "${local.name_prefix}-frontend-nsg"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["FrontendSubnet"]]
-  security_rules = [
-    {
-      name                       = "Allow-Traffic-From-AppGateway"
-      priority                   = 100
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "80"
-      source_address_prefix      = "10.1.1.0/24"
-      destination_address_prefix = "10.1.2.0/24"
-    },
-    {
-      name                       = "Allow-Bastion-SSH-Inbound"
-      priority                   = 110
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "22"
-      source_address_prefix      = "10.0.2.0/26"
-      destination_address_prefix = "10.1.2.0/24"
-    }
-  ]
-  tags = local.tags
-}
-
-module "internal_lb_nsg" {
-  source              = "../../modules/nsg"
-  name                = "${local.name_prefix}-ilb-nsg"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["InternalLbSubnet"]]
-  security_rules = [
-    {
-      name                       = "Allow-Frontend-To-ILB"
-      priority                   = 100
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "8080"
-      source_address_prefix      = "10.1.2.0/24"
-      destination_address_prefix = "10.1.3.0/24"
-    }
-  ]
-  tags = local.tags
-}
-
-module "backend_nsg" {
-  source              = "../../modules/nsg"
-  name                = "${local.name_prefix}-backend-nsg"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["BackendSubnet"]]
-  security_rules = [
-    {
-      name                       = "Allow-Traffic-From-ILB"
-      priority                   = 100
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "8080"
-      source_address_prefix      = "10.1.3.0/24"
-      destination_address_prefix = "10.1.4.0/24"
-    },
-    {
-      name                       = "Allow-Bastion-SSH-Inbound"
-      priority                   = 110
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "22"
-      source_address_prefix      = "10.0.2.0/26"
-      destination_address_prefix = "10.1.4.0/24"
-    }
-  ]
-  tags = local.tags
-}
-
-module "pe_nsg" {
-  source              = "../../modules/nsg"
-  name                = "${local.name_prefix}-pe-nsg"
-  resource_group_name = module.spoke_rg.name
-  location            = module.spoke_rg.location
-  subnet_ids          = [module.spoke_subnets.subnet_ids["PrivateEndpointSubnet"]]
-  security_rules = [
-    {
-      name                       = "Allow-Backend-To-PE"
-      priority                   = 100
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_ranges    = ["443", "1433"]
-      source_address_prefix      = "10.1.4.0/24"
-      destination_address_prefix = "10.1.5.0/24"
-    }
-  ]
-  tags = local.tags
-}
-
-# Application Gateway WAF
+# Load Balancers
 module "application_gateway" {
-  count                      = var.enable_application_gateway ? 1 : 0
+  count                      = var.application_gateway.enabled ? 1 : 0
   source                     = "../../modules/application-gateway"
   name                       = "${local.name_prefix}-appgw"
-  resource_group_name        = module.spoke_rg.name
-  location                   = module.spoke_rg.location
-  subnet_id                  = module.spoke_subnets.subnet_ids["AppGatewaySubnet"]
-  waf_mode                   = "Detection" # Detection in Dev
-  zones                      = ["1", "2"]
-  min_capacity               = 1
-  max_capacity               = 3
-  backend_port               = 80
-  health_probe_path          = "/healthz"
+  resource_group_name        = module.resource_groups["spoke"].name
+  location                   = module.resource_groups["spoke"].location
+  subnet_id                  = module.subnets["spoke"].subnet_ids["AppGatewaySubnet"]
+  waf_mode                   = var.application_gateway.waf_mode
+  zones                      = var.application_gateway.zones
+  min_capacity               = var.application_gateway.min_capacity
+  max_capacity               = var.application_gateway.max_capacity
+  backend_port               = var.application_gateway.backend_port
+  health_probe_path          = var.application_gateway.health_probe_path
   log_analytics_workspace_id = module.monitoring.id
   tags                       = local.tags
 }
 
-# Internal LB
 module "internal_lb" {
   source                     = "../../modules/internal-load-balancer"
   name                       = "${local.name_prefix}-ilb"
-  resource_group_name        = module.spoke_rg.name
-  location                   = module.spoke_rg.location
-  subnet_id                  = module.spoke_subnets.subnet_ids["InternalLbSubnet"]
-  zones                      = ["1", "2"]
-  frontend_port              = 8080
-  backend_port               = 8080
-  probe_protocol             = "Http"
-  probe_path                 = "/healthz"
+  resource_group_name        = module.resource_groups["spoke"].name
+  location                   = module.resource_groups["spoke"].location
+  subnet_id                  = module.subnets["spoke"].subnet_ids["InternalLbSubnet"]
+  zones                      = var.internal_lb.zones
+  frontend_port              = var.internal_lb.frontend_port
+  backend_port               = var.internal_lb.backend_port
+  probe_protocol             = var.internal_lb.probe_protocol
+  probe_path                 = var.internal_lb.probe_path
   log_analytics_workspace_id = module.monitoring.id
   tags                       = local.tags
 }
 
-# Frontend VMSS
-module "frontend_vmss" {
-  source                                       = "../../modules/linux-vmss"
-  name                                         = "${local.name_prefix}-fe-vmss"
-  resource_group_name                          = module.spoke_rg.name
-  location                                     = module.spoke_rg.location
-  sku                                          = var.frontend_vm_sku
-  instances                                    = var.frontend_instances
-  admin_username                               = var.admin_username
-  admin_ssh_public_key                         = var.admin_ssh_public_key
-  zones                                        = ["1", "2"]
-  subnet_id                                    = module.spoke_subnets.subnet_ids["FrontendSubnet"]
-  application_gateway_backend_address_pool_ids = var.enable_application_gateway ? [module.application_gateway[0].backend_address_pool_id] : []
-  custom_data                                  = local.frontend_cloud_init
-  tags                                         = local.tags
-}
+# VMSS (for_each over nested map)
+module "vmss" {
+  for_each             = var.vms
+  source               = "../../modules/linux-vmss"
+  name                 = "${local.name_prefix}-${each.value.name_suffix}"
+  resource_group_name  = module.resource_groups[each.value.rg_key].name
+  location             = module.resource_groups[each.value.rg_key].location
+  sku                  = each.value.sku
+  instances            = each.value.instances
+  min_instances        = each.value.min_instances
+  max_instances        = each.value.max_instances
+  zones                = each.value.zones
+  admin_username       = var.admin_username
+  admin_ssh_public_key = var.admin_ssh_public_key
+  subnet_id            = module.subnets[each.value.vnet_key].subnet_ids[each.value.subnet_key]
 
-# Backend VMSS
-module "backend_vmss" {
-  source                                 = "../../modules/linux-vmss"
-  name                                   = "${local.name_prefix}-be-vmss"
-  resource_group_name                    = module.spoke_rg.name
-  location                               = module.spoke_rg.location
-  sku                                    = var.backend_vm_sku
-  instances                              = var.backend_instances
-  admin_username                         = var.admin_username
-  admin_ssh_public_key                   = var.admin_ssh_public_key
-  zones                                  = ["1", "2"]
-  subnet_id                              = module.spoke_subnets.subnet_ids["BackendSubnet"]
-  load_balancer_backend_address_pool_ids = [module.internal_lb.backend_address_pool_id]
-  custom_data                            = local.backend_cloud_init
-  tags                                   = local.tags
+  application_gateway_backend_address_pool_ids = (
+    each.value.target_balancer == "appgw" && var.application_gateway.enabled ?
+    [module.application_gateway[0].backend_address_pool_id] : []
+  )
+  load_balancer_backend_address_pool_ids = (
+    each.value.target_balancer == "ilb" ?
+    [module.internal_lb.backend_address_pool_id] : []
+  )
+
+  custom_data = each.key == "frontend" ? local.frontend_cloud_init : local.backend_cloud_init
+  tags        = local.tags
 }
 
 # Private DNS
 module "private_dns" {
   source              = "../../modules/private-dns"
-  resource_group_name = module.hub_rg.name
-  dns_zone_names = [
-    "privatelink.database.windows.net",
-    "privatelink.blob.core.windows.net",
-    "privatelink.vaultcore.azure.net"
-  ]
+  resource_group_name = module.resource_groups["hub"].name
+  dns_zone_names      = var.private_dns_zones
   virtual_network_ids = {
-    hub   = module.hub_vnet.id
-    spoke = module.spoke_vnet.id
+    hub   = module.virtual_networks["hub"].id
+    spoke = module.virtual_networks["spoke"].id
   }
   tags = local.tags
 }
 
-# PaaS & Private Endpoints
+# PaaS
 module "key_vault" {
   source                        = "../../modules/key-vault"
   name                          = substr(replace("${local.name_prefix}-kv-${random_string.unique.result}", "-", ""), 0, 24)
-  resource_group_name           = module.hub_rg.name
-  location                      = module.hub_rg.location
+  resource_group_name           = module.resource_groups["hub"].name
+  location                      = module.resource_groups["hub"].location
   sku_name                      = "standard"
   purge_protection_enabled      = false
   public_network_access_enabled = false
@@ -578,67 +332,90 @@ module "key_vault" {
   tags                          = local.tags
 }
 
-module "key_vault_pe" {
-  count                = var.enable_private_endpoints ? 1 : 0
-  source               = "../../modules/private-endpoint"
-  name                 = "${local.name_prefix}-kv-pe"
-  resource_group_name  = module.spoke_rg.name
-  location             = module.spoke_rg.location
-  subnet_id            = module.spoke_subnets.subnet_ids["PrivateEndpointSubnet"]
-  target_resource_id   = module.key_vault.id
-  subresource_names    = ["vault"]
-  private_dns_zone_ids = [module.private_dns.zone_ids["privatelink.vaultcore.azure.net"]]
-  tags                 = local.tags
-}
-
 module "storage_account" {
   source                        = "../../modules/storage-account"
   name                          = replace(lower("${var.project_name}${var.environment}${random_string.unique.result}sa"), "-", "")
-  resource_group_name           = module.data_rg.name
-  location                      = module.data_rg.location
+  resource_group_name           = module.resource_groups["data"].name
+  location                      = module.resource_groups["data"].location
   replication_type              = "LRS"
   public_network_access_enabled = false
   log_analytics_workspace_id    = module.monitoring.id
   tags                          = local.tags
 }
 
-module "storage_pe" {
-  count                = var.enable_private_endpoints ? 1 : 0
-  source               = "../../modules/private-endpoint"
-  name                 = "${local.name_prefix}-sa-pe"
-  resource_group_name  = module.spoke_rg.name
-  location             = module.spoke_rg.location
-  subnet_id            = module.spoke_subnets.subnet_ids["PrivateEndpointSubnet"]
-  target_resource_id   = module.storage_account.id
-  subresource_names    = ["blob"]
-  private_dns_zone_ids = [module.private_dns.zone_ids["privatelink.blob.core.windows.net"]]
-  tags                 = local.tags
-}
-
 module "sql_database" {
   source                        = "../../modules/sql-database"
   server_name                   = "${local.name_prefix}-sqlsvr-${random_string.unique.result}"
   database_name                 = "${local.name_prefix}-db"
-  resource_group_name           = module.data_rg.name
-  location                      = module.data_rg.location
-  admin_username                = var.sql_admin_username
-  admin_password                = var.sql_admin_password
+  resource_group_name           = module.resource_groups["data"].name
+  location                      = module.resource_groups["data"].location
+  admin_username                = var.sql_database.admin_username
+  admin_password                = var.sql_database.admin_password
   public_network_access_enabled = false
-  sku_name                      = "S0"
-  zone_redundant                = false
+  sku_name                      = var.sql_database.sku_name
+  zone_redundant                = var.sql_database.zone_redundant
+  max_size_gb                   = var.sql_database.max_size_gb
   log_analytics_workspace_id    = module.monitoring.id
   tags                          = local.tags
 }
 
-module "sql_pe" {
-  count                = var.enable_private_endpoints ? 1 : 0
-  source               = "../../modules/private-endpoint"
-  name                 = "${local.name_prefix}-sql-pe"
-  resource_group_name  = module.spoke_rg.name
-  location             = module.spoke_rg.location
-  subnet_id            = module.spoke_subnets.subnet_ids["PrivateEndpointSubnet"]
-  target_resource_id   = module.sql_database.server_id
-  subresource_names    = ["sqlServer"]
-  private_dns_zone_ids = [module.private_dns.zone_ids["privatelink.database.windows.net"]]
+module "cosmos_db" {
+  count                         = var.cosmos_db.enabled ? 1 : 0
+  source                        = "../../modules/cosmos-db"
+  name                          = "${local.name_prefix}-cosmos-${random_string.unique.result}"
+  resource_group_name           = module.resource_groups["data"].name
+  location                      = module.resource_groups["data"].location
+  zone_redundant                = var.cosmos_db.zone_redundant
+  public_network_access_enabled = false
+  log_analytics_workspace_id    = module.monitoring.id
+  tags                          = local.tags
+}
+
+module "redis" {
+  count                         = var.redis.enabled ? 1 : 0
+  source                        = "../../modules/redis"
+  name                          = "${local.name_prefix}-redis-${random_string.unique.result}"
+  resource_group_name           = module.resource_groups["data"].name
+  location                      = module.resource_groups["data"].location
+  sku_name                      = var.redis.sku_name
+  family                        = var.redis.family
+  capacity                      = var.redis.capacity
+  zones                         = var.redis.zones
+  public_network_access_enabled = false
+  log_analytics_workspace_id    = module.monitoring.id
+  tags                          = local.tags
+}
+
+# Private Endpoints (for_each over nested map)
+module "private_endpoints" {
+  for_each            = var.enable_private_endpoints ? var.private_endpoints : {}
+  source              = "../../modules/private-endpoint"
+  name                = "${local.name_prefix}-${each.value.name_suffix}"
+  resource_group_name = module.resource_groups[each.value.rg_key].name
+  location            = module.resource_groups[each.value.rg_key].location
+  subnet_id           = module.subnets[each.value.vnet_key].subnet_ids[each.value.subnet_key]
+
+  target_resource_id = (
+    each.value.target_type == "key_vault" ? module.key_vault.id :
+    each.value.target_type == "storage" ? module.storage_account.id :
+    each.value.target_type == "sql" ? module.sql_database.server_id :
+    each.value.target_type == "cosmos" ? (var.cosmos_db.enabled ? module.cosmos_db[0].id : null) :
+    each.value.target_type == "redis" ? (var.redis.enabled ? module.redis[0].id : null) : null
+  )
+
+  subresource_names    = each.value.subresource_names
+  private_dns_zone_ids = [module.private_dns.zone_ids[each.value.dns_zone_name]]
   tags                 = local.tags
+}
+
+# Backup
+module "backup" {
+  count                 = var.backup.enabled ? 1 : 0
+  source                = "../../modules/backup"
+  name                  = "${local.name_prefix}-rsv"
+  resource_group_name   = module.resource_groups["hub"].name
+  location              = module.resource_groups["hub"].location
+  storage_mode_type     = var.backup.storage_mode_type
+  retention_daily_count = var.backup.retention_daily_count
+  tags                  = local.tags
 }

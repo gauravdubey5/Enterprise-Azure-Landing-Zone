@@ -2,37 +2,37 @@
 
 output "hub_resource_group_name" {
   description = "The name of the Hub Resource Group"
-  value       = module.hub_rg.name
+  value       = module.resource_groups["hub"].name
 }
 
 output "spoke_resource_group_name" {
   description = "The name of the Spoke Resource Group"
-  value       = module.spoke_rg.name
+  value       = module.resource_groups["spoke"].name
 }
 
 output "hub_virtual_network_name" {
   description = "The name of the Hub Virtual Network"
-  value       = module.hub_vnet.name
+  value       = module.virtual_networks["hub"].name
 }
 
 output "spoke_virtual_network_name" {
   description = "The name of the Spoke Virtual Network"
-  value       = module.spoke_vnet.name
+  value       = module.virtual_networks["spoke"].name
 }
 
 output "firewall_private_ip" {
   description = "Private IP of Azure Firewall (egress next-hop)"
-  value       = var.enable_firewall ? module.firewall[0].private_ip : null
+  value       = var.firewall.enabled ? module.firewall[0].private_ip : null
 }
 
 output "firewall_public_ip" {
   description = "Public IP of Azure Firewall"
-  value       = var.enable_firewall ? module.firewall[0].public_ip : null
+  value       = var.firewall.enabled ? module.firewall[0].public_ip : null
 }
 
 output "application_gateway_public_ip" {
   description = "Public IP address of Application Gateway WAF (primary ingress)"
-  value       = var.enable_application_gateway ? module.application_gateway[0].public_ip : null
+  value       = var.application_gateway.enabled ? module.application_gateway[0].public_ip : null
 }
 
 output "internal_load_balancer_private_ip" {
@@ -58,4 +58,14 @@ output "key_vault_uri" {
 output "storage_account_name" {
   description = "Name of the Azure Storage Account"
   value       = module.storage_account.name
+}
+
+output "vmss_ids" {
+  description = "Map of VMSS tier names to resource IDs"
+  value       = { for k, v in module.vmss : k => v.id }
+}
+
+output "private_endpoint_ips" {
+  description = "Map of Private Endpoint names to private IP addresses"
+  value       = { for k, v in module.private_endpoints : k => v.private_ip_address }
 }

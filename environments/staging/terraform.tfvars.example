@@ -1,4 +1,5 @@
-# Staging Environment Configuration
+# Staging Environment Configuration - All values in nested maps and objects
+
 project_name   = "gd-ent"
 environment    = "staging"
 location       = "eastus"
@@ -7,31 +8,439 @@ owner          = "StagingPlatformTeam"
 cost_center    = "CC-STAGE-PLATFORM"
 criticality    = "Tier-2-High-Availability"
 
-# Network
-hub_address_space   = ["10.0.0.0/16"]
-spoke_address_space = ["10.1.0.0/16"]
-
-# Feature Flags
-enable_firewall            = true
-firewall_sku_tier          = "Standard"
-enable_bastion             = true
-enable_vpn_gateway         = true
-enable_application_gateway = true
-enable_private_endpoints   = true
-enable_cosmos_db           = true
-enable_redis               = true
-enable_monitoring          = true
-enable_backup              = true
-
-# Compute VMSS Sizing
-frontend_vm_sku    = "Standard_D2s_v5"
-frontend_instances = 2
-backend_vm_sku     = "Standard_D2s_v5"
-backend_instances  = 2
-
 admin_username       = "azureuser"
 admin_ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGX8a5dF+p1k93VqM5yL01bZl81234567890abcdefgh enterprise-admin@company.com"
 
-# SQL Database Credentials
-sql_admin_username = "sqladminuser"
-sql_admin_password = "P@ssw0rdStaging2026!#Strong"
+# 1. Resource Groups Nested Map
+resource_groups = {
+  hub = {
+    name_suffix = "hub-rg"
+  }
+  spoke = {
+    name_suffix = "spoke-rg"
+  }
+  data = {
+    name_suffix = "data-rg"
+  }
+}
+
+# 2. Virtual Networks & Subnets Nested Map
+networks = {
+  hub = {
+    name_suffix   = "hub-vnet"
+    rg_key        = "hub"
+    address_space = ["10.0.0.0/16"]
+    subnets = {
+      AzureFirewallSubnet = {
+        address_prefixes = ["10.0.1.0/26"]
+      }
+      AzureFirewallManagementSubnet = {
+        address_prefixes = ["10.0.1.64/26"]
+      }
+      AzureBastionSubnet = {
+        address_prefixes = ["10.0.2.0/26"]
+      }
+      GatewaySubnet = {
+        address_prefixes = ["10.0.3.0/27"]
+      }
+      InboundDnsResolverSubnet = {
+        address_prefixes = ["10.0.4.0/28"]
+        delegations = [{
+          name = "Microsoft.Network.dnsResolvers"
+          service_delegation = {
+            name    = "Microsoft.Network/dnsResolvers"
+            actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+          }
+        }]
+      }
+      OutboundDnsResolverSubnet = {
+        address_prefixes = ["10.0.4.16/28"]
+        delegations = [{
+          name = "Microsoft.Network.dnsResolvers"
+          service_delegation = {
+            name    = "Microsoft.Network/dnsResolvers"
+            actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+          }
+        }]
+      }
+      SharedServicesSubnet = {
+        address_prefixes  = ["10.0.5.0/24"]
+        service_endpoints = ["Microsoft.KeyVault", "Microsoft.Storage"]
+      }
+    }
+  }
+
+  spoke = {
+    name_suffix   = "spoke-vnet"
+    rg_key        = "spoke"
+    address_space = ["10.1.0.0/16"]
+    subnets = {
+      AppGatewaySubnet = {
+        address_prefixes = ["10.1.1.0/24"]
+      }
+      FrontendSubnet = {
+        address_prefixes  = ["10.1.2.0/24"]
+        service_endpoints = ["Microsoft.KeyVault", "Microsoft.Storage"]
+      }
+      InternalLbSubnet = {
+        address_prefixes = ["10.1.3.0/24"]
+      }
+      BackendSubnet = {
+        address_prefixes  = ["10.1.4.0/24"]
+        service_endpoints = ["Microsoft.Sql", "Microsoft.Storage", "Microsoft.KeyVault"]
+      }
+      PrivateEndpointSubnet = {
+        address_prefixes                  = ["10.1.5.0/24"]
+        private_endpoint_network_policies = "Disabled"
+      }
+    }
+  }
+}
+
+# 3. Route Tables Nested Map
+route_tables = {
+  appgw = {
+    name_suffix = "appgw-rt"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "AppGatewaySubnet"
+    routes = [
+      {
+        name          = "Direct-Internet-Ingress"
+        address_prefix = "0.0.0.0/0"
+        next_hop_type  = "Internet"
+      }
+    ]
+  }
+  frontend = {
+    name_suffix = "frontend-rt"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "FrontendSubnet"
+    routes = [
+      {
+        name                 = "Egress-Via-Hub-Firewall"
+        address_prefix       = "0.0.0.0/0"
+        next_hop_type        = "VirtualAppliance"
+        next_hop_to_firewall = true
+      }
+    ]
+  }
+  backend = {
+    name_suffix = "backend-rt"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "BackendSubnet"
+    routes = [
+      {
+        name                 = "Egress-Via-Hub-Firewall"
+        address_prefix       = "0.0.0.0/0"
+        next_hop_type        = "VirtualAppliance"
+        next_hop_to_firewall = true
+      }
+    ]
+  }
+}
+
+# 4. Network Security Groups Nested Map
+network_security_groups = {
+  appgw = {
+    name_suffix = "appgw-nsg"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "AppGatewaySubnet"
+    security_rules = [
+      {
+        name                   = "Allow-HTTP-Inbound"
+        priority               = 100
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "80"
+        source_address_prefix  = "*"
+        destination_address_prefix = "*"
+      },
+      {
+        name                   = "Allow-GatewayManager-Inbound"
+        priority               = 120
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "65200-65535"
+        source_address_prefix  = "GatewayManager"
+        destination_address_prefix = "*"
+      }
+    ]
+  }
+
+  frontend = {
+    name_suffix = "frontend-nsg"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "FrontendSubnet"
+    security_rules = [
+      {
+        name                   = "Allow-Traffic-From-AppGateway"
+        priority               = 100
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "80"
+        source_address_prefix  = "10.1.1.0/24"
+        destination_address_prefix = "10.1.2.0/24"
+      },
+      {
+        name                   = "Allow-Bastion-SSH-Inbound"
+        priority               = 110
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "22"
+        source_address_prefix  = "10.0.2.0/26"
+        destination_address_prefix = "10.1.2.0/24"
+      }
+    ]
+  }
+
+  internal_lb = {
+    name_suffix = "ilb-nsg"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "InternalLbSubnet"
+    security_rules = [
+      {
+        name                   = "Allow-Frontend-To-ILB"
+        priority               = 100
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "8080"
+        source_address_prefix  = "10.1.2.0/24"
+        destination_address_prefix = "10.1.3.0/24"
+      }
+    ]
+  }
+
+  backend = {
+    name_suffix = "backend-nsg"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "BackendSubnet"
+    security_rules = [
+      {
+        name                   = "Allow-Traffic-From-ILB"
+        priority               = 100
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "8080"
+        source_address_prefix  = "10.1.3.0/24"
+        destination_address_prefix = "10.1.4.0/24"
+      },
+      {
+        name                   = "Allow-Bastion-SSH-Inbound"
+        priority               = 110
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_range = "22"
+        source_address_prefix  = "10.0.2.0/26"
+        destination_address_prefix = "10.1.4.0/24"
+      }
+    ]
+  }
+
+  pe = {
+    name_suffix = "pe-nsg"
+    rg_key      = "spoke"
+    vnet_key    = "spoke"
+    subnet_key  = "PrivateEndpointSubnet"
+    security_rules = [
+      {
+        name                   = "Allow-Backend-To-PE"
+        priority               = 100
+        direction              = "Inbound"
+        access                 = "Allow"
+        protocol               = "Tcp"
+        source_port_range      = "*"
+        destination_port_ranges = ["443", "1433", "6380"]
+        source_address_prefix  = "10.1.4.0/24"
+        destination_address_prefix = "10.1.5.0/24"
+      }
+    ]
+  }
+}
+
+# 5. Linux VMSS Compute Nested Map
+vms = {
+  frontend = {
+    name_suffix     = "fe-vmss"
+    rg_key          = "spoke"
+    vnet_key        = "spoke"
+    subnet_key      = "FrontendSubnet"
+    sku             = "Standard_D2s_v5"
+    instances       = 2
+    min_instances   = 2
+    max_instances   = 5
+    zones           = ["1", "2"]
+    target_balancer = "appgw"
+  }
+  backend = {
+    name_suffix     = "be-vmss"
+    rg_key          = "spoke"
+    vnet_key        = "spoke"
+    subnet_key      = "BackendSubnet"
+    sku             = "Standard_D2s_v5"
+    instances       = 2
+    min_instances   = 2
+    max_instances   = 5
+    zones           = ["1", "2"]
+    target_balancer = "ilb"
+  }
+}
+
+# 6. Private DNS Zones
+private_dns_zones = [
+  "privatelink.database.windows.net",
+  "privatelink.blob.core.windows.net",
+  "privatelink.vaultcore.azure.net",
+  "privatelink.documents.azure.com",
+  "privatelink.redis.cache.windows.net"
+]
+
+enable_private_endpoints = true
+
+# 7. Private Endpoints Nested Map
+private_endpoints = {
+  key_vault = {
+    name_suffix       = "kv-pe"
+    rg_key            = "spoke"
+    vnet_key          = "spoke"
+    subnet_key        = "PrivateEndpointSubnet"
+    target_type       = "key_vault"
+    subresource_names = ["vault"]
+    dns_zone_name     = "privatelink.vaultcore.azure.net"
+  }
+  storage = {
+    name_suffix       = "sa-pe"
+    rg_key            = "spoke"
+    vnet_key          = "spoke"
+    subnet_key        = "PrivateEndpointSubnet"
+    target_type       = "storage"
+    subresource_names = ["blob"]
+    dns_zone_name     = "privatelink.blob.core.windows.net"
+  }
+  sql = {
+    name_suffix       = "sql-pe"
+    rg_key            = "spoke"
+    vnet_key          = "spoke"
+    subnet_key        = "PrivateEndpointSubnet"
+    target_type       = "sql"
+    subresource_names = ["sqlServer"]
+    dns_zone_name     = "privatelink.database.windows.net"
+  }
+  cosmos = {
+    name_suffix       = "cosmos-pe"
+    rg_key            = "spoke"
+    vnet_key          = "spoke"
+    subnet_key        = "PrivateEndpointSubnet"
+    target_type       = "cosmos"
+    subresource_names = ["Sql"]
+    dns_zone_name     = "privatelink.documents.azure.com"
+  }
+  redis = {
+    name_suffix       = "redis-pe"
+    rg_key            = "spoke"
+    vnet_key          = "spoke"
+    subnet_key        = "PrivateEndpointSubnet"
+    target_type       = "redis"
+    subresource_names = ["redisCache"]
+    dns_zone_name     = "privatelink.redis.cache.windows.net"
+  }
+}
+
+# 8. Structured Service Objects
+firewall = {
+  enabled           = true
+  sku_tier          = "Standard"
+  threat_intel_mode = "Alert"
+  zones             = ["1", "2"]
+}
+
+bastion = {
+  enabled = true
+  sku     = "Standard"
+  zones   = ["1", "2"]
+}
+
+vpn_gateway = {
+  enabled       = true
+  sku           = "VpnGw1AZ"
+  active_active = true
+  enable_bgp    = false
+  zones         = ["1", "2"]
+}
+
+dns_resolver = {
+  enabled          = true
+  forwarding_rules = {}
+}
+
+application_gateway = {
+  enabled           = true
+  waf_mode          = "Prevention"
+  min_capacity      = 2
+  max_capacity      = 5
+  zones             = ["1", "2"]
+  backend_port      = 80
+  health_probe_path = "/healthz"
+}
+
+internal_lb = {
+  frontend_port  = 8080
+  backend_port   = 8080
+  probe_protocol = "Http"
+  probe_path     = "/healthz"
+  zones          = ["1", "2"]
+}
+
+sql_database = {
+  sku_name       = "GP_Gen5_2"
+  zone_redundant = true
+  max_size_gb    = 32
+  admin_username = "sqladminuser"
+  admin_password = "P@ssw0rdStaging2026!#Strong"
+}
+
+cosmos_db = {
+  enabled        = true
+  zone_redundant = true
+}
+
+redis = {
+  enabled  = true
+  sku_name = "Premium"
+  family   = "P"
+  capacity = 1
+  zones    = ["1", "2"]
+}
+
+monitoring = {
+  retention_in_days  = 30
+  alert_email        = "staging-alerts@company.com"
+  enable_vmss_alert  = true
+  enable_appgw_alert = true
+}
+
+backup = {
+  enabled               = true
+  storage_mode_type     = "GeoRedundant"
+  retention_daily_count = 14
+}
