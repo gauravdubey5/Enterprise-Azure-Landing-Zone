@@ -23,8 +23,8 @@ To establish a secure, collaborative, locked remote state backend, deploy the bo
 # 1. Navigate to the bootstrap directory
 cd bootstrap/terraform-backend
 
-# 2. Review variables or create terraform.tfvars
-cp terraform.tfvars.example terraform.tfvars
+# 2. Review or customize terraform.tfvars
+cat terraform.tfvars
 
 # 3. Initialize and apply bootstrap
 terraform init
